@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+starting_directory=$PWD
+if [[ -n ${KOREADER_DIR:-} ]]; then
+    runtime=$KOREADER_DIR
+elif command -v flatpak >/dev/null && deployment=$(flatpak info --show-location rocks.koreader.KOReader); then
+    runtime=$deployment/files/lib/koreader
+else
+    printf '%s\n' 'Set KOREADER_DIR to the KOReader directory containing luajit and setupkoenv.lua.' >&2
+    exit 2
+fi
+export TMPDIR="$HOME/tmp"
+mkdir -p -- "$TMPDIR"
+scratch=$(mktemp -d -p "$TMPDIR" localsend-lite-cli.XXXXXX)
+trap 'rm -rf -- "$scratch"' EXIT
+cd -- "$runtime"
+export LUA_PATH="$repository/localsend-lite.koplugin/?.lua;;"
+export LD_LIBRARY_PATH="$PWD/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+./luajit "$repository/tools/localsend-lite.lua" "$scratch" "$starting_directory" "$@"
