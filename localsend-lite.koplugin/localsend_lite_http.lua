@@ -117,10 +117,10 @@ function Stream:headers(timeout)
     return first_line, headers
 end
 
-function Stream:take(length, sink)
+function Stream:take(length, sink, idle_timeout)
     local remaining = length
     while remaining > 0 do
-        assert(#self.buffer > 0 or self:fill(socket.gettime() + 20), "Truncated HTTP body")
+        assert(#self.buffer > 0 or self:fill(socket.gettime() + idle_timeout), "Truncated HTTP body")
         local count = math.min(remaining, #self.buffer)
         sink(self.buffer:sub(1, count))
         self.buffer = self.buffer:sub(count + 1)
@@ -128,14 +128,15 @@ function Stream:take(length, sink)
     end
 end
 
-function Stream:body(headers, limit, sink, until_close)
+function Stream:body(headers, limit, sink, until_close, idle_timeout)
+    idle_timeout = idle_timeout or 20
     local transfer_encoding = headers["transfer-encoding"]
     local content_length = headers["content-length"]
     if transfer_encoding then
         assert(not content_length and transfer_encoding:lower() == "chunked", "Unsupported HTTP framing")
         local received = 0
         while true do
-            local deadline = socket.gettime() + 20
+            local deadline = socket.gettime() + idle_timeout
             local chunk_line = self:line(128, deadline)
             local hex_size = chunk_line:match("^([%da-fA-F]+)$") or chunk_line:match("^([%da-fA-F]+);")
             local chunk_size = hex_size and tonumber(hex_size, 16)
@@ -148,20 +149,20 @@ function Stream:body(headers, limit, sink, until_close)
                     trailer_budget = trailer_budget - #trailer - 2
                 end
             end
-            self:take(chunk_size, sink)
-            assert(self:line(2, socket.gettime() + 20) == "", "Invalid chunk separator")
+            self:take(chunk_size, sink, idle_timeout)
+            assert(self:line(2, socket.gettime() + idle_timeout) == "", "Invalid chunk separator")
             received = received + chunk_size
         end
     end
     if content_length then
         local length = content_length:match("^%d+$") and tonumber(content_length)
         assert(length and length <= limit, "Invalid or oversized HTTP content length")
-        self:take(length, sink)
+        self:take(length, sink, idle_timeout)
         return length
     end
     if not until_close then return 0 end
     local received = 0
-    while #self.buffer > 0 or self:fill(socket.gettime() + 20) do
+    while #self.buffer > 0 or self:fill(socket.gettime() + idle_timeout) do
         received = received + #self.buffer
         assert(received <= limit, "HTTP response is too large")
         sink(self.buffer)

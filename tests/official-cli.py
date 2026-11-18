@@ -19,7 +19,7 @@ payload = b"KOReader LocalSend\x00interop\n" * 45056
 ansi_codes = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 
 @contextmanager
-def run(cli_destination, plugin_destination, mode, file):
+def run(cli_destination, plugin_destination, mode, files):
     for folder in (cli_destination, plugin_destination):
         folder.mkdir()
     test_environment = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(scratch / "cli-config"))
@@ -28,11 +28,12 @@ def run(cli_destination, plugin_destination, mode, file):
     cli_command = [str(cli), "--alias", "Official LocalSend test", "--port", "53320",
                    "--destination", str(cli_destination)]
     if mode == "receive":
-        cli_command.extend(["-f", str(file)])
+        for file in files:
+            cli_command.extend(["-f", str(file)])
     official = subprocess.Popen(cli_command, stdin=slave, stdout=slave, stderr=slave, env=test_environment)
     os.close(slave)
     plugin = subprocess.Popen(
-        ["./luajit", str(peer_script), str(plugin_destination), mode, str(file)],
+        ["./luajit", str(peer_script), str(plugin_destination), mode, str(files[0])],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     official_output = b""
@@ -73,21 +74,23 @@ def run(cli_destination, plugin_destination, mode, file):
 plugin_file = sender_folder / "from-koreader.epub"
 plugin_file.write_bytes(payload)
 official_destination = scratch / "official-inbox"
-with run(official_destination, scratch / "plugin-sending", "send", plugin_file) as (await_output, terminal):
+with run(official_destination, scratch / "plugin-sending", "send", [plugin_file]) as (await_output, terminal):
     await_output(lambda output, _: "from-koreader.epub" in output)
     os.write(terminal, b"y")
     await_output(lambda _, output: "SENT\n" in output)
     assert (official_destination / plugin_file.name).read_bytes() == payload
     print("PASS: plugin → official LocalSend 1.18.2, HTTPS, byte-for-byte")
 
-official_file = sender_folder / "from-official.epub"
-official_file.write_bytes(payload)
+official_files = [sender_folder / f"from-official-{index}.epub" for index in range(1, 5)]
+for official_file in official_files:
+    official_file.write_bytes(payload)
 plugin_destination = scratch / "plugin-inbox"
-with run(scratch / "official-sending", plugin_destination, "receive", official_file) as (await_output, terminal):
+with run(scratch / "official-sending", plugin_destination, "receive", official_files) as (await_output, terminal):
     device_label = re.compile(r"\[(\d)\]\s+熱心的杏桃")
     cli_output, _ = await_output(lambda output, _: device_label.search(output))
     device_index = int(device_label.search(cli_output).group(1))
     os.write(terminal, b"\x1b[B" * (device_index - 1) + b"\r")
-    await_output(lambda _, output: "RECEIVED " in output)
-    assert (plugin_destination / official_file.name).read_bytes() == payload
-    print("PASS: official LocalSend 1.18.2 → plugin, HTTPS, byte-for-byte")
+    await_output(lambda _, output: output.count("RECEIVED ") == len(official_files))
+    for official_file in official_files:
+        assert (plugin_destination / official_file.name).read_bytes() == payload
+    print("PASS: official LocalSend 1.18.2 → plugin, four HTTPS files in one batch, byte-for-byte")

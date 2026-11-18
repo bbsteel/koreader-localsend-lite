@@ -15,7 +15,8 @@ local MAX_CONNECTIONS = 16
 local MAX_FILES = 128
 local METADATA_LIMIT = 262144
 local APPROVAL_TIMEOUT = 120
-local SESSION_TIMEOUT = 120
+local BATCH_IDLE_TIMEOUT = 300
+local UPLOAD_IDLE_TIMEOUT = 60
 
 local function decode(body)
     local ok, data = pcall(json.decode, body)
@@ -41,7 +42,14 @@ local function releaseTask(task)
     if task.connection then task.connection:close() end
     if task.file then task.file:close() end
     if task.partial_path then os.remove(task.partial_path) end
-    if task.incoming_file then task.incoming_file.busy = nil end
+    local incoming_file = task.incoming_file
+    if incoming_file then
+        incoming_file.busy = nil
+        if not incoming_file.saved then
+            task.session.received_bytes = task.session.received_bytes - incoming_file.received_bytes
+            incoming_file.received_bytes = 0
+        end
+    end
 end
 
 local function queryParameters(query)
@@ -212,17 +220,24 @@ function Service:listPeers()
 end
 
 function Service:prepare(task, stream, headers, address)
-    if self.incoming then return stream:respond(409) end
+    local function rejectOffer(status, reason)
+        self:emit("diagnostic", "receive.offer_rejected", status, reason)
+        return stream:respond(status)
+    end
+    if self.incoming then return rejectOffer(409, "receiver busy") end
     local request = metadata(stream, headers)
-    if self.incoming then return stream:respond(409) end
+    if self.incoming then return rejectOffer(409, "receiver busy") end
     if not request or type(request.info) ~= "table" or not validString(request.info.alias, 128)
-        or type(request.files) ~= "table" then return stream:respond(400) end
+        or type(request.files) ~= "table" then return rejectOffer(400, "invalid offer metadata") end
     if task.remote_fingerprint and (not fingerprint(request.info.fingerprint)
-        or request.info.fingerprint:upper() ~= task.remote_fingerprint) then return stream:respond(403) end
+        or request.info.fingerprint:upper() ~= task.remote_fingerprint) then
+        return rejectOffer(403, "sender fingerprint mismatch")
+    end
     local session = {
         id = Identity.randomId(), address = address, alias = request.info.alias,
         fingerprint = task.remote_fingerprint,
         files = {}, ordered_files = {}, remaining = 0, saved = 0,
+        total_files = 0, total_bytes = 0, received_bytes = 0, upload_count = 0,
         expires = socket.gettime() + APPROVAL_TIMEOUT,
     }
     local offered_count = 0
@@ -232,31 +247,40 @@ function Service:prepare(task, stream, headers, address)
             or not validString(entry.fileName, 1024) or type(entry.size) ~= "number"
             or entry.size < 0 or entry.size > Http.MAX_BODY or entry.size % 1 ~= 0
             or not validString(entry.fileType, 255) or offered_count > MAX_FILES then
-            return stream:respond(400)
+            return rejectOffer(400, "invalid file metadata or too many files")
         end
         -- LocalSend puts a standalone message in preview. A .txt attachment
         -- uses the normal file upload and has no message preview.
         local media_type = entry.fileType:lower():match("^%s*([^;%s]+)")
         local is_message = media_type == "text/plain" and type(entry.preview) == "string"
         if not is_message then
-            local file = { size = entry.size, token = Identity.randomId() }
+            local file = { size = entry.size, token = Identity.randomId(), received_bytes = 0 }
             file.name = safeName(entry.fileName)
-            if not file.name then return stream:respond(400) end
+            if not file.name then return rejectOffer(400, "invalid file name") end
             if fingerprint(entry.sha256) then file.sha256 = entry.sha256:upper() end
             session.files[file_id] = file
             session.ordered_files[#session.ordered_files + 1] = file
             session.remaining = session.remaining + 1
+            session.total_bytes = session.total_bytes + file.size
         end
     end
-    if session.remaining == 0 then return stream:respond(offered_count == 0 and 400 or 403) end
+    if session.remaining == 0 then
+        return rejectOffer(offered_count == 0 and 400 or 403, "no supported files")
+    end
+    session.total_files = session.remaining
     self.incoming = session
     task.preparing_session = session
+    self:emit("diagnostic", "receive.offered", session.alias, session.total_files, session.total_bytes)
     self:emit("offer", session, function(accepted)
-        if self.incoming == session then session.accepted = accepted == true end
+        if self.incoming == session then
+            session.accepted = accepted == true
+            if session.accepted then session.expires = socket.gettime() + BATCH_IDLE_TIMEOUT end
+        end
     end)
     while session.accepted == nil and socket.gettime() < session.expires do
         coroutine.yield()
         if session.accepted == nil and not stream:peerIsWaiting() then
+            self:emit("diagnostic", "receive.offer_disconnected")
             if self.incoming == session then self.incoming = nil end
             self:emit("offerClosed", session)
             return
@@ -265,38 +289,51 @@ function Service:prepare(task, stream, headers, address)
     if not session.accepted then
         if self.incoming == session then self.incoming = nil end
         self:emit("offerClosed", session)
-        return stream:respond(session.accepted == false and 403 or 408)
+        if session.accepted == false then return rejectOffer(403, "declined") end
+        return rejectOffer(408, "approval timeout")
     end
     local tokens = {}
     for file_id, file in pairs(session.files) do
         tokens[file_id] = file.token
     end
-    session.expires = socket.gettime() + SESSION_TIMEOUT
     stream:respond(200, json.encode({ sessionId = session.id, files = tokens }))
     task.preparing_session = nil
+    self:emit("diagnostic", "receive.accepted", session.total_files)
+    for _, file in ipairs(session.ordered_files) do
+        self:emit("diagnostic", "receive.expected", file.name, file.size)
+    end
 end
 
 function Service:upload(task, stream, headers, parameters, address)
+    local function rejectUpload(status, reason, file)
+        self:emit("diagnostic", "receive.upload_rejected", status, reason, file and file.name)
+        return stream:respond(status)
+    end
     if not parameters.sessionId or not parameters.fileId or not parameters.token then
-        return stream:respond(400)
+        return rejectUpload(400, "missing parameters")
     end
     local session = self.incoming
     if not session or not session.accepted or session.id ~= parameters.sessionId then
-        return stream:respond(409)
+        return rejectUpload(409, "no matching accepted session")
     end
     local file = session.files[parameters.fileId]
     if session.address ~= address or session.fingerprint ~= task.remote_fingerprint
         or not file or file.token ~= parameters.token then
-        return stream:respond(403)
+        return rejectUpload(403, "sender or file authorization mismatch")
     end
-    if file.busy or file.saved then return stream:respond(409) end
-    if not headers["content-length"] and not headers["transfer-encoding"] then return stream:respond(400) end
+    if file.busy or file.saved then return rejectUpload(409, file.saved and "already saved" or "already uploading", file) end
+    if not headers["content-length"] and not headers["transfer-encoding"] then
+        return rejectUpload(400, "missing body framing", file)
+    end
     if headers["content-length"] and tonumber(headers["content-length"]) ~= file.size then
-        return stream:respond(400)
+        return rejectUpload(400, "content length mismatch", file)
     end
     file.busy = true
+    session.upload_count = session.upload_count + 1
+    file.receive_order = session.upload_count
     task.incoming_file = file
     task.session = session
+    self:emit("diagnostic", "receive.upload_started", file.name, file.size)
     task.partial_path = self.receive_directory .. "/.localsend-lite-" .. file.token .. ".part"
     task.file = assert(io.open(task.partial_path, "wb"))
     local digest = file.sha256 and Identity.sha256()
@@ -305,13 +342,21 @@ function Service:upload(task, stream, headers, parameters, address)
         assert(self.incoming == session, "Transfer was cancelled")
         assert(task.file:write(chunk))
         if digest then digest(chunk) end
-        session.expires = socket.gettime() + SESSION_TIMEOUT
-    end)
+        file.received_bytes = file.received_bytes + #chunk
+        session.received_bytes = session.received_bytes + #chunk
+        session.expires = socket.gettime() + BATCH_IDLE_TIMEOUT
+    end, nil, UPLOAD_IDLE_TIMEOUT)
     local handle = task.file
     task.file = nil
     assert(handle:close())
-    if size ~= file.size then return stream:respond(400) end
-    if digest and digest() ~= file.sha256 then return stream:respond(422) end
+    if size ~= file.size then
+        self:emit("receiveFailed", file.name, "Truncated HTTP body")
+        return rejectUpload(400, "truncated body", file)
+    end
+    if digest and digest() ~= file.sha256 then
+        self:emit("receiveFailed", file.name, "Checksum mismatch")
+        return rejectUpload(422, "checksum mismatch", file)
+    end
     local destination = availablePath(self.receive_directory, file.name)
     assert(os.rename(task.partial_path, destination))
     task.partial_path = nil
@@ -319,14 +364,21 @@ function Service:upload(task, stream, headers, parameters, address)
     session.saved = session.saved + 1
     session.remaining = session.remaining - 1
     if session.remaining == 0 then self.incoming = nil end
+    self:emit("diagnostic", "receive.saved", file.name, session.saved, session.total_files)
     stream:respond(200)
+    self:emit("diagnostic", "receive.response_sent", file.name, 200)
     self:emit("received", destination, session)
 end
 
 function Service:serve(task, connection, address)
     local stream = Http.stream(task, connection)
+    local batch_from_sender = self.incoming and self.incoming.accepted and self.incoming.address == address
+    if batch_from_sender then task.receive_stage = "TLS handshake" end
     if self.info.protocol == "https" then stream:enableTLS(self.identity.server) end
-    local line, headers = stream:headers()
+    batch_from_sender = self.incoming and self.incoming.accepted and self.incoming.address == address
+    task.receive_stage = batch_from_sender and "HTTP headers" or nil
+    local line, headers = stream:headers(batch_from_sender and UPLOAD_IDLE_TIMEOUT or nil)
+    task.receive_stage = nil
     local method, target = line:match("^(%u+) ([^%s]+) HTTP/1%.[01]$")
     if not method then return stream:respond(400) end
     local route, query = target:match("^([^?]+)%??(.*)$")
@@ -344,9 +396,15 @@ function Service:serve(task, connection, address)
         self:remember(address, remote_info)
         return stream:respond(200, json.encode(self.info))
     end
-    if route == PREFIX .. "/prepare-upload" then return self:prepare(task, stream, headers, address) end
+    if route == PREFIX .. "/prepare-upload" then
+        task.receive_stage = "prepare-upload"
+        return self:prepare(task, stream, headers, address)
+    end
     local parameters = queryParameters(query or "")
-    if route == PREFIX .. "/upload" then return self:upload(task, stream, headers, parameters, address) end
+    if route == PREFIX .. "/upload" then
+        task.receive_stage = "upload"
+        return self:upload(task, stream, headers, parameters, address)
+    end
     if route == PREFIX .. "/cancel" then
         local session = self.incoming
         if not session or parameters.sessionId ~= session.id or address ~= session.address
@@ -355,7 +413,9 @@ function Service:serve(task, connection, address)
         end
         session.accepted = false
         self.incoming = nil
+        self:emit("diagnostic", "receive.ended", "sender cancelled", session.saved, session.total_files)
         self:emit("offerClosed", session)
+        self:emit("receiveEnded", session, "cancelled")
         return stream:respond(200)
     end
     return stream:respond(404)
@@ -372,6 +432,7 @@ end
 
 function Service:send(peer, files, pin, callback)
     if self.outgoing then callback(false, "A transfer is already in progress"); return end
+    self:emit("diagnostic", "send.started", peer.alias, #files)
     local outgoing = {}
     local offered_files = {}
     for _, file in ipairs(files) do
@@ -385,6 +446,7 @@ function Service:send(peer, files, pin, callback)
         if pin and pin ~= "" then prepare_url = prepare_url .. queryString({ pin = pin }) end
         local status, response = Http.request(send_task, peer, self.identity.client, prepare_url,
             json.encode({ info = self.info, files = offered_files }), "application/json", nil, APPROVAL_TIMEOUT)
+        self:emit("diagnostic", "send.response", "prepare-upload", status)
         if status == 204 then return true end
         if status ~= 200 then return false, status end
         local accepted = decode(response)
@@ -401,6 +463,7 @@ function Service:send(peer, files, pin, callback)
                 })
                 status = Http.request(send_task, peer, self.identity.client, upload_url,
                     nil, "application/octet-stream", file)
+                self:emit("diagnostic", "send.response", file.fileName, status)
                 if status < 200 or status >= 300 then return false, status end
                 sent_count = sent_count + 1
             end
@@ -408,6 +471,7 @@ function Service:send(peer, files, pin, callback)
         return sent_count > 0, sent_count
     end, function(ok, success, detail)
         self.outgoing = nil
+        self:emit("diagnostic", ok and success and "send.done" or "send.failed", ok and detail or success)
         if not ok or not success then self:cancelRemote(peer, outgoing.session_id) end
         if ok then callback(success, detail) else callback(false, success) end
     end, "outgoing")
@@ -427,6 +491,7 @@ end
 function Service:cancelSend()
     local outgoing = self.outgoing
     if not outgoing then return end
+    self:emit("diagnostic", "send.cancelled")
     outgoing.task.cancelled = true
     self.outgoing = nil
     self:cancelRemote(outgoing.peer, outgoing.session_id)
@@ -434,7 +499,10 @@ end
 
 function Service:tick()
     if self.incoming and self.incoming.accepted and socket.gettime() >= self.incoming.expires then
+        local expired_session = self.incoming
         self.incoming = nil
+        self:emit("diagnostic", "receive.ended", "idle timeout", expired_session.saved, expired_session.total_files)
+        self:emit("receiveEnded", expired_session, "timeout")
     end
     if self.multicast then
         for _ = 1, 8 do
@@ -468,13 +536,23 @@ function Service:tick()
             local ok, result, detail = coroutine.resume(task.thread)
             if not ok or coroutine.status(task.thread) == "dead" then
                 table.remove(self.tasks, task_index)
+                if not ok and task.receive_stage then
+                    local file = task.incoming_file
+                    self:emit("diagnostic", "receive.request_failed", task.receive_stage,
+                        file and file.name, file and file.received_bytes, result)
+                end
                 releaseTask(task)
                 if task.preparing_session and self.incoming == task.preparing_session then
                     self.incoming = nil
                     self:emit("offerClosed", task.preparing_session)
                 end
                 if task.done then task.done(ok, result, detail) end
-                if not ok and task.kind == "incoming" then self:emit("networkError", result) end
+                if not ok and task.kind == "incoming" then
+                    self:emit("networkError", result)
+                    if task.incoming_file and not task.incoming_file.saved and self.incoming == task.session then
+                        self:emit("receiveFailed", task.incoming_file.name, result)
+                    end
+                end
             end
         end
     end

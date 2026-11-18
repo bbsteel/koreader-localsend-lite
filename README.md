@@ -4,7 +4,7 @@
 
 Send and receive books and other files over your local network using [LocalSend v2.2](https://github.com/localsend/protocol).
 
-**About 24 KB to download.** The v0.1.0 ZIP contains a Lua plugin that runs entirely inside KOReader and reuses its bundled networking libraries. The network service starts on demand when you send or receive files.
+**About 29 KB to download.** The v0.1.2 ZIP contains a Lua plugin that runs entirely inside KOReader and reuses its bundled networking libraries. The network service starts on demand when you send or receive files.
 
 ## Install
 
@@ -17,10 +17,10 @@ If you're upgrading from the pre-Lite development build of this project, move it
 ## Send and receive
 
 - **Send files** opens KOReader's file chooser. Long-press a file, confirm your choice, then select a discovered device. For a batch, select the files in the file browser's selection mode before opening **Send files**.
-- **Receive files** displays your device nickname and save folder. Leave the screen open, select the nickname on the sending device, then accept on your reader. The default destination is the current library folder. New files receive a numeric suffix if the name is already taken.
+- **Receive files** displays your device nickname and save folder. Leave the screen open, select the nickname on the sending device, then accept on your reader. The receiver shows the current file, progress, transfer speed, and the number of files saved. The default destination is the current library folder. New files receive a numeric suffix if the name is already taken.
 - **Stop** closes the receiver. On Kindle, the plugin allows the LocalSend ports on Wi-Fi while in use and removes its firewall rules when it stops.
 
-Nicknames follow the KOReader interface language and stay stable for the same device identity and language. The plugin includes 22 nickname word lists and falls back to English. File bodies stream in 32 KiB chunks. Transfers support up to 128 files per batch and files smaller than 4 GiB. Plain `.txt` files transfer normally. The plugin's discovery uses IPv4 multicast at `224.0.0.167:53317` and its receiver uses HTTPS on TCP port `53317` by default.
+The plugin interface supports English, Simplified Chinese, and Traditional Chinese. Nicknames follow the KOReader interface language and stay stable for the same device identity and language. The plugin includes 22 nickname word lists and falls back to English. File bodies stream in 32 KiB chunks. Transfers support up to 128 files per batch and files smaller than 4 GiB. Plain `.txt` files transfer normally. The plugin's discovery uses IPv4 multicast at `224.0.0.167:53317` and its receiver uses HTTPS on TCP port `53317` by default.
 
 ## Verification
 
@@ -28,8 +28,12 @@ Run the tests against KOReader v2026.07.1 on Linux. Each runner defaults to the 
 
 | Command | Coverage |
 | --- | --- |
-| `bash tests/run-koreader-ui.sh` | Plugin loading, Tools menu placement, receiver lifecycle and localized nicknames |
-| `bash tests/run-loopback.sh` | Discovery, file transfer, TLS fingerprints, checksum handling, cancellation and mocked Kindle firewall cleanup |
-| `bash tests/run-official-cli.sh` | Discovery by Chinese nickname and byte-for-byte HTTPS transfers in both directions with the official LocalSend CLI 1.18.2 |
+| `bash tests/run-koreader-ui.sh` | Plugin loading, Tools menu placement, receive progress, Chinese interface and mocked Kindle startup diagnostics |
+| `bash tests/run-loopback.sh` | Discovery, delayed fourth upload, TLS fingerprints, checksum handling, cancellation, firewall cleanup and log rotation |
+| `bash tests/run-official-cli.sh` | Discovery by Chinese nickname, four-file receiving batch and byte-for-byte HTTPS transfers in both directions with the official LocalSend CLI 1.18.2 |
 
-An earlier build was installed on a Kindle Paperwhite 2. Hotspot discovery with this release still needs a device test.
+An earlier build was installed on a Kindle Paperwhite 2. The v0.1.2 receive and log changes have been tested on Linux, with Kindle startup simulated.
+
+## Troubleshooting
+
+The plugin writes a local diagnostic log when you open **Send files** or **Receive files**. On Kindle, look for `koreader/settings/localsend-lite.log` and, if present, `localsend-lite.log.1` on the USB drive. Each file is capped at 64 KiB. The logs include startup and firewall events, filenames, upload status, and errors. If a transfer fails, note its time and the error shown on the sending device before collecting the logs. Review filenames and device nicknames before sharing them.

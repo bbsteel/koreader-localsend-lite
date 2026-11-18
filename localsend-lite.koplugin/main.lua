@@ -4,6 +4,7 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local T = require("ffi/util").template
 local gettext = require("gettext")
+local translate = require("localsend_lite_locale")
 
 local PLUGIN_ID = "localsend-lite"
 local LocalSend = WidgetContainer:extend{ name = PLUGIN_ID }
@@ -22,13 +23,20 @@ function LocalSend:init()
     self.ui.menu:registerToMainMenu(self)
 end
 
+function LocalSend:log(event, ...)
+    if not self.write_log then
+        self.write_log = require("localsend_lite_log")(DataStorage:getSettingsDir() .. "/localsend-lite.log")
+    end
+    self.write_log(event, ...)
+end
+
 function LocalSend:addToMainMenu(menu_items)
     menu_items[PLUGIN_ID] = {
-        text = gettext("LocalSend Lite"),
+        text = translate("LocalSend Lite"),
         sorting_hint = "tools",
         sub_item_table = {
-            { text = gettext("Send files"), callback = function() self:chooseFiles() end },
-            { text = gettext("Receive files"), callback = function() self:begin("receive") end },
+            { text = translate("Send files"), callback = function() self:chooseFiles() end },
+            { text = translate("Receive files"), callback = function() self:begin("receive") end },
         },
     }
     -- KOReader adds items with sorting_hint at the end of the tab.
@@ -73,14 +81,39 @@ function LocalSend:chooseFiles()
 end
 
 function LocalSend:begin(mode, paths)
-    if self.service then return end
+    if self.service or self.startup or self.closing_firewall then return end
+    self:log("start.requested", mode)
     require("ui/network/manager"):runWhenConnected(function()
         if not self.ui.tearing_down then self:start(mode, paths) end
     end)
 end
 
 function LocalSend:start(mode, paths)
-    if self.service then return end
+    if self.service or self.startup or self.closing_firewall then return end
+    self:log("start.begin", mode, Device.model)
+    if not Device:isKindle() then return self:startService(mode, paths) end
+
+    local startup = {}
+    self.startup = startup
+    self.startup_dialog = require("ui/widget/buttondialog"):new{
+        title = translate("Starting LocalSend Lite…"),
+        dismissable = false,
+        buttons = {{ { text = translate("Cancel"), callback = function()
+            self:log("start.cancelled")
+            self:stop()
+        end } }},
+    }
+    UIManager:show(self.startup_dialog)
+    UIManager:tickAfterNext(function()
+        coroutine.wrap(function()
+            if not startup.cancelled then self:startService(mode, paths, startup) end
+            self.startup = nil
+            self:closeWidget("startup_dialog")
+        end)()
+    end)
+end
+
+function LocalSend:startService(mode, paths, startup)
     local prepared_files
     local success, failure = pcall(function()
         local Identity = require("localsend_lite_identity")
@@ -97,7 +130,7 @@ function LocalSend:start(mode, paths)
             kindle_network = require("localsend_lite_kindle")
             wifi_interface = require("ui/network/manager"):getNetworkInterfaceName()
             wifi_address = assert(kindle_network.wifiAddress(wifi_interface),
-                gettext("Wi-Fi has no IPv4 address."))
+                translate("Wi-Fi has no IPv4 address."))
         end
         local service = Service.new{
             alias = require("localsend_lite_alias")(identity.fingerprint, gettext.current_lang),
@@ -112,11 +145,18 @@ function LocalSend:start(mode, paths)
                 end,
                 offerClosed = function(session) self:closeOffer(session) end,
                 received = function(path, session) self:showReceived(path, session) end,
-                networkError = function(message) require("logger").dbg("LocalSend", message) end,
+                receiveEnded = function(session, reason) self:showReceiveEnded(session, reason) end,
+                receiveFailed = function(filename, failure)
+                    local reason = tostring(failure):gsub("^.-:%d+: ", "")
+                    require("logger").warn("LocalSend Lite receive failed:", filename, reason)
+                    notify(T(translate("Could not receive %1: %2"), filename, translate(reason)), 4)
+                end,
+                networkError = function(message) require("logger").dbg("LocalSend Lite", message) end,
+                diagnostic = self.write_log,
             },
         }
         if mode == "send" then
-            assert(#paths <= Service.MAX_FILES, T(gettext("At most %1 files per transfer."), Service.MAX_FILES))
+            assert(#paths <= Service.MAX_FILES, T(translate("At most %1 files per transfer."), Service.MAX_FILES))
             prepared_files = {}
             for _, path in ipairs(paths) do
                 local extension = path:match("%.([^./]+)$") or ""
@@ -124,28 +164,40 @@ function LocalSend:start(mode, paths)
             end
         end
         self.service = service
+        self:log("listener.begin", port)
         service:start()
         if kindle_network then
+            self:log("firewall.open.begin", wifi_interface)
             self.close_firewall = assert(kindle_network.openFirewall(wifi_interface, wifi_address,
-                port, service.discovery_port, Service.MULTICAST_GROUP))
+                port, service.discovery_port, Service.MULTICAST_GROUP, nil, self.write_log))
+            self:log("firewall.open.done")
         end
-        assert(service:announce(true))
+        if not startup or not startup.cancelled then assert(service:announce(true)) end
     end)
+    if startup and startup.cancelled then
+        self:closeKindleFirewall()
+        return
+    end
     if not success then
+        local reason = tostring(failure):gsub("^.-:%d+: ", "")
+        self:log("start.failed", mode, reason)
         self:stop()
-        notify(T(gettext("LocalSend Lite could not start: %1"), tostring(failure)))
+        require("logger").warn("LocalSend Lite startup failed:", reason)
+        notify(T(translate("LocalSend Lite could not start: %1"), translate(reason)))
         return
     end
 
     local service = self.service
+    self:log("start.ready", mode, service.info.port)
     if mode == "send" then self:showPeers(prepared_files) else self:showReceiver() end
     local socket = require("socket")
     local next_announcement = socket.gettime() + 2
     self.poll = function()
         local ok, error_message = pcall(service.tick, service)
         if not ok then
+            self:log("listener.failed", error_message)
             self:stop()
-            notify(T(gettext("LocalSend Lite stopped: %1"), tostring(error_message)))
+            notify(T(translate("LocalSend Lite stopped: %1"), tostring(error_message)))
         elseif self.service == service then
             if self.finish_cancellation then
                 local cancellation_pending
@@ -160,6 +212,7 @@ function LocalSend:start(mode, paths)
                 next_announcement = socket.gettime() + (self.peer_menu and 2 or 5)
             end
             if self.peer_menu then self:updatePeers() end
+            if self.receive_dialog then self:updateReceiveStatus() end
             UIManager:scheduleIn(#service.tasks > 0 and 0.02 or 0.15, self.poll)
         end
     end
@@ -172,16 +225,38 @@ function LocalSend:closeWidget(field)
     if widget then UIManager:close(widget) end
 end
 
-function LocalSend:stop()
+function LocalSend:closeKindleFirewall()
+    local close_firewall = self.close_firewall
+    if not close_firewall then return end
+    self.close_firewall = nil
+    self.closing_firewall = true
+    self:log("firewall.close.begin")
+    coroutine.wrap(function()
+        local completed, removed = pcall(close_firewall)
+        self.closing_firewall = nil
+        if completed and removed then
+            self:log("firewall.close.done")
+        else
+            self:log("firewall.close.failed", removed)
+            if not completed then require("logger").warn("LocalSend Lite firewall cleanup failed:", removed) end
+        end
+    end)()
+end
+
+function LocalSend:stop(reason)
+    if self.service then
+        local session = self.service.incoming
+        self:log("listener.stop", reason or "closed", session and session.saved, session and session.total_files)
+    end
+    if self.startup then self.startup.cancelled = true end
     if self.poll then UIManager:unschedule(self.poll) end
     if self.service then self.service:stop() end
-    if self.close_firewall then
-        self.close_firewall()
-        self.close_firewall = nil
-    end
+    self:closeKindleFirewall()
     self.service, self.poll, self.finish_cancellation = nil, nil, nil
     self.peer_snapshot = nil
+    self.receive_progress = nil
     self:closeOffer()
+    self:closeWidget("startup_dialog")
     self:closeWidget("transfer_dialog")
     self:closeWidget("receive_dialog")
     self:closeWidget("peer_menu")
@@ -198,15 +273,14 @@ function LocalSend:stopPlugin()
 end
 
 LocalSend.onCloseWidget = LocalSend.stop
-LocalSend.onExit = LocalSend.stop
-LocalSend.onSuspend = LocalSend.stop
-LocalSend.onNetworkDisconnected = LocalSend.stop
+function LocalSend:onExit() self:stop("KOReader exit") end
+function LocalSend:onSuspend() self:stop("device suspended") end
+function LocalSend:onNetworkDisconnected() self:stop("network disconnected") end
 
 function LocalSend:showReceiver()
-    local service = self.service
     self.receive_dialog = require("ui/widget/buttondialog"):new{
-        title = T(gettext("Waiting for files as %1\n\nSave to %2"), service.info.alias, service.receive_directory),
-        buttons = {{ { text = gettext("Stop"), callback = function() self:stop() end } }},
+        title = self:waitingForFilesTitle(),
+        buttons = {{ { text = translate("Stop"), callback = function() self:stop() end } }},
         tap_close_callback = function()
             self.receive_dialog = nil
             self:stop()
@@ -215,12 +289,69 @@ function LocalSend:showReceiver()
     UIManager:show(self.receive_dialog)
 end
 
+function LocalSend:waitingForFilesTitle()
+    return T(translate("Waiting for files as %1\n\nSave to %2"),
+        self.service.info.alias, self.service.receive_directory)
+end
+
+function LocalSend:updateReceiveStatus()
+    local dialog = self.receive_dialog
+    if not dialog then return end
+    local session = self.service.incoming
+    if not session or not session.accepted then
+        if self.receive_progress then
+            self.receive_progress = nil
+            dialog:setTitle(self:waitingForFilesTitle())
+        end
+        return
+    end
+
+    local now = require("socket").gettime()
+    local previous = self.receive_progress
+    local bytes_per_second = 0
+    if previous and previous.session == session then
+        local elapsed = now - previous.updated_at
+        if elapsed < 1 then return end
+        bytes_per_second = math.max(0, (session.received_bytes - previous.received_bytes) / elapsed)
+    end
+    self.receive_progress = { session = session, updated_at = now, received_bytes = session.received_bytes }
+
+    local current_file
+    local active_count = 0
+    for _, file in ipairs(session.ordered_files) do
+        if file.busy and not file.saved then
+            active_count = active_count + 1
+            if not current_file or file.receive_order < current_file.receive_order then current_file = file end
+        end
+    end
+    local current_status = translate("Waiting for the next file…")
+    if current_file then
+        local file_percent = current_file.size == 0 and 100
+            or math.floor(100 * current_file.received_bytes / current_file.size)
+        current_status = T(translate("Current file: %1 (%2%)"), current_file.name, file_percent)
+        if active_count > 1 then
+            current_status = current_status .. "\n" .. T(translate("%1 other files receiving"), active_count - 1)
+        end
+    end
+
+    local batch_percent = session.total_bytes > 0
+        and math.floor(100 * session.received_bytes / session.total_bytes)
+        or math.floor(100 * session.saved / session.total_files)
+    local speed = require("util").getFriendlySize(math.floor(bytes_per_second))
+    local title = table.concat({
+        T(translate("Receiving from %1"), session.alias),
+        current_status,
+        T(translate("%1/%2 files saved · %3% · %4/s"), session.saved, session.total_files, batch_percent, speed),
+    }, "\n\n")
+    if dialog.title ~= title then dialog:setTitle(title) end
+end
+
 function LocalSend:showPeers(files)
     local menu = require("ui/widget/menu"):new{
-        title = gettext("LocalSend Lite"),
+        title = translate("LocalSend Lite"),
         width = Device.screen:getWidth(),
         height = Device.screen:getHeight(),
-        item_table = { { text = gettext("Looking for nearby devices…"), select_enabled = false } },
+        item_table = { { text = translate("Looking for nearby devices…"), select_enabled = false } },
         onMenuSelect = function(_, item)
             if item.peer then
                 self:closeWidget("peer_menu")
@@ -256,7 +387,7 @@ function LocalSend:updatePeers()
     local items = {}
     for _, peer in ipairs(peers) do
         local label = peer.alias
-        if peer.protocol == "http" then label = T(gettext("%1 (unencrypted)"), label) end
+        if peer.protocol == "http" then label = T(translate("%1 (unencrypted)"), label) end
         items[#items + 1] = { text = label, peer = peer }
     end
     self.peer_menu:switchItemTable(nil, items)
@@ -264,10 +395,10 @@ end
 
 function LocalSend:requestPin(peer, files)
     self.pin_dialog = require("ui/widget/inputdialog"):new{
-        title = gettext("Receiver PIN"),
+        title = translate("Receiver PIN"),
         buttons = {{
-            { text = gettext("Cancel"), id = "close", callback = function() self:stop() end },
-            { text = gettext("Send"), callback = function()
+            { text = translate("Cancel"), id = "close", callback = function() self:stop() end },
+            { text = translate("Send"), callback = function()
                 local pin = self.pin_dialog:getInputText()
                 self:closeWidget("pin_dialog")
                 self:send(peer, files, pin)
@@ -280,9 +411,9 @@ end
 
 function LocalSend:send(peer, files, pin)
     self.transfer_dialog = require("ui/widget/buttondialog"):new{
-        title = T(gettext("Sending to %1…"), peer.alias),
+        title = T(translate("Sending to %1…"), peer.alias),
         dismissable = false,
-        buttons = {{ { text = gettext("Cancel"), callback = function()
+        buttons = {{ { text = translate("Cancel"), callback = function()
             self.service:cancelSend()
             self:closeWidget("transfer_dialog")
             self.finish_cancellation = true
@@ -295,16 +426,16 @@ function LocalSend:send(peer, files, pin)
         self:stop()
         if success then
             if type(detail) == "number" and detail < #files then
-                notify(T(gettext("Sent %1 of %2 files."), detail, #files), 3)
+                notify(T(translate("Sent %1 of %2 files."), detail, #files), 3)
             else
-                notify(gettext("LocalSend Lite transfer complete."), 2)
+                notify(translate("LocalSend Lite transfer complete."), 2)
             end
         elseif detail == 403 then
-            notify(gettext("The receiver declined the transfer."), 3)
+            notify(translate("The receiver declined the transfer."), 3)
         elseif detail == 409 then
-            notify(gettext("The receiver is busy with another transfer."), 3)
+            notify(translate("The receiver is busy with another transfer."), 3)
         else
-            notify(T(gettext("LocalSend Lite transfer failed: %1"), tostring(detail or gettext("No files were accepted"))))
+            notify(T(translate("LocalSend Lite transfer failed: %1"), tostring(detail or translate("No files were accepted"))))
         end
     end)
 end
@@ -317,20 +448,21 @@ function LocalSend:closeOffer(session)
 end
 
 function LocalSend:showOffer(session, respond)
-    local lines = { T(gettext("Receive files from %1?"), session.alias), "" }
+    local lines = { T(translate("Receive files from %1?"), session.alias), "" }
     for index, file in ipairs(session.ordered_files) do
-        if index > 5 then lines[#lines + 1] = T(gettext("+%1 more"), #session.ordered_files - 5); break end
+        if index > 5 then lines[#lines + 1] = T(translate("+%1 more"), #session.ordered_files - 5); break end
         lines[#lines + 1] = file.name
     end
     self.offer_session = session
     local function decide(accepted)
         self.offer_session, self.offer_dialog = nil, nil
         respond(accepted)
+        if accepted then self:updateReceiveStatus() end
     end
     self.offer_dialog = require("ui/widget/confirmbox"):new{
         text = table.concat(lines, "\n"),
-        ok_text = gettext("Accept"),
-        cancel_text = gettext("Decline"),
+        ok_text = translate("Accept"),
+        cancel_text = translate("Decline"),
         ok_callback = function() decide(true) end,
         cancel_callback = function() decide(false) end,
         dismissable = false,
@@ -341,10 +473,18 @@ end
 function LocalSend:showReceived(path, session)
     self.received_files = true
     if session.remaining == 0 then
-        local message = session.saved == 1 and T(gettext("Received %1"), path:match("[^/]+$"))
-            or T(gettext("Received %1 files."), session.saved)
+        local message = session.saved == 1 and T(translate("Received %1"), path:match("[^/]+$"))
+            or T(translate("Received %1 files."), session.saved)
         notify(message, 3)
     end
+end
+
+function LocalSend:showReceiveEnded(session, reason)
+    self:updateReceiveStatus()
+    if session.saved > 0 then self.received_files = true end
+    local message = reason == "timeout" and translate("Saved %1 of %2 files. Transfer timed out.")
+        or translate("Saved %1 of %2 files. Sender cancelled.")
+    notify(T(message, session.saved, session.total_files), 4)
 end
 
 return LocalSend
