@@ -2,7 +2,9 @@
 
 [简体中文](README.zh-CN.md)
 
-Send and receive books and other files over your local network using [LocalSend v2.2](https://github.com/localsend/protocol). The plugin uses KOReader's bundled Lua and network libraries. Its network service runs while the send or receive screen is open.
+Send and receive books and other files over your local network using [LocalSend v2.2](https://github.com/localsend/protocol).
+
+**About 24 KB to download.** The v0.1.0 ZIP contains a Lua plugin that runs entirely inside KOReader and reuses its bundled networking libraries. The network service starts on demand when you send or receive files.
 
 ## Install
 
@@ -19,17 +21,6 @@ If you're upgrading from the pre-Lite development build of this project, move it
 - **Stop** closes the receiver. On Kindle, the plugin allows the LocalSend ports on Wi-Fi while in use and removes its firewall rules when it stops.
 
 Nicknames follow the KOReader interface language and stay stable for the same device identity and language. The plugin includes 22 nickname word lists and falls back to English. File bodies stream in 32 KiB chunks. Transfers support up to 128 files per batch and files smaller than 4 GiB. Plain `.txt` files transfer normally. The plugin's discovery uses IPv4 multicast at `224.0.0.167:53317` and its receiver uses HTTPS on TCP port `53317` by default.
-
-## Send from scripts or agents
-
-From a checkout of this repository on a Linux computer on the same LAN, run the bundled CLI. It uses the installed KOReader Flatpak, or the KOReader runtime directory specified by `KOREADER_DIR`. On the reader, open **Receive files** and note the displayed nickname.
-
-```sh
-./tools/localsend-lite list
-./tools/localsend-lite send --to "Quiet Peach" --file ./sample.epub
-```
-
-Replace `Quiet Peach` with the nickname shown by the reader. The send command waits for approval on the reader. The CLI prints one JSON object to standard output and returns a nonzero status if the requested transfer fails or is only partially accepted. Repeat `--file` to send multiple files. If two devices share a nickname, use the device fingerprint from the discovery output.
 
 ## Verification
 

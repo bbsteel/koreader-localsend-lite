@@ -2,7 +2,9 @@
 
 [English](README.md)
 
-通过 [LocalSend v2.2](https://github.com/localsend/protocol) 在局域网内收发电子书和其他文件。插件复用 KOReader 自带的 Lua 和网络库，只在发送或接收界面打开时运行网络服务。
+通过 [LocalSend v2.2](https://github.com/localsend/protocol) 在局域网内收发电子书和其他文件。
+
+**v0.1.0 安装包仅约 24 KB。** 插件在 KOReader 内运行，复用其自带的 Lua 运行环境和网络库，收发文件时才启动网络服务。
 
 ## 安装
 
@@ -19,17 +21,6 @@
 - **Stop（停止）** 关闭接收服务。Kindle 版在传输界面打开期间临时放行 Wi‑Fi 上的 LocalSend 端口，并在停止时撤销规则。
 
 昵称跟随 KOReader 界面语言，同一设备身份在同一语言下使用固定昵称。插件内置 22 套昵称词库，其他语言使用英文。文件按 32 KiB 分块读写，每批最多 128 个文件，单个小于 4 GiB。普通 `.txt` 附件可正常传输。发现使用 IPv4 组播 `224.0.0.167:53317`，默认接收端口为 HTTPS TCP `53317`。
-
-## 供脚本或 Agent 调用
-
-在同一局域网的 Linux 电脑上克隆本仓库，运行随源码提供的 CLI。它默认使用已安装的 Flatpak 版 KOReader，也可通过 `KOREADER_DIR` 指定 KOReader 运行目录。阅读器打开 **Receive files** 并记下屏幕上的昵称。
-
-```sh
-./tools/localsend-lite list
-./tools/localsend-lite send --to "安静的蜜桃" --file ./sample.epub
-```
-
-把「安静的蜜桃」换成阅读器显示的昵称。命令会等待阅读器确认。命令在标准输出写一个 JSON 对象。传输失败或对方只接收部分文件时，退出状态为非零。重复使用 `--file` 可以发送多个文件。若设备重名，可使用发现结果里的设备指纹。
 
 ## 验证
 
