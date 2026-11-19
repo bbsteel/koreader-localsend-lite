@@ -39,7 +39,7 @@ function LocalSend:addToMainMenu(menu_items)
         text = translate("LocalSend Lite"),
         sorting_hint = "tools",
         sub_item_table = {
-            { text = translate("Send files"), callback = function() self:chooseFiles() end },
+            { text = translate("Send files"), callback = function() self:chooseFiles(true) end },
             { text = translate("Receive files"), callback = function() self:begin("receive") end },
         },
     }
@@ -65,23 +65,72 @@ function LocalSend:defaultDirectory()
     return filemanagerutil.getHomeFolder() or filemanagerutil.getDefaultDir()
 end
 
-function LocalSend:chooseFiles()
-    if self.ui.selected_files and next(self.ui.selected_files) then
+function LocalSend:chooseFiles(use_library_selection)
+    if use_library_selection and self.ui.selected_files and next(self.ui.selected_files) then
         local paths = {}
-        for path in pairs(self.ui.selected_files) do paths[#paths + 1] = path end
+        for path, selected in pairs(self.ui.selected_files) do
+            if selected then paths[#paths + 1] = path end
+        end
         table.sort(paths)
-        self:begin("send", paths)
-        return
+        if #paths > 0 then return self:useSendFiles(paths) end
     end
-    UIManager:show(require("ui/widget/pathchooser"):new{
+    UIManager:show(require("localsend_lite_picker"):new{
         path = self:defaultDirectory(),
         height = Device.screen:getHeight(),
-        select_directory = false,
-        show_unsupported = true,
-        onConfirm = function(path)
-            UIManager:nextTick(function() self:begin("send", { path }) end)
-        end,
+        preview_file = function(path) self:previewFile(path) end,
+        on_files_selected = function(paths) self:useSendFiles(paths) end,
     })
+end
+
+function LocalSend:useSendFiles(paths)
+    if not self.peer_menu then return self:begin("send", paths) end
+    local prepared, files = pcall(self.prepareFiles, self, self.service, paths)
+    if not prepared then notify(tostring(files), 4); return end
+    self.send_files = files
+    self:updatePeers(true)
+end
+
+function LocalSend:prepareFiles(service, paths)
+    local maximum = require("localsend_lite_service").MAX_FILES
+    assert(#paths <= maximum, T(translate("At most %1 files per transfer."), maximum))
+    local files = {}
+    for _, path in ipairs(paths) do
+        local extension = path:match("%.([^./]+)$") or ""
+        files[#files + 1] = service:file(path, MIME_TYPES[extension:lower()])
+    end
+    return files
+end
+
+function LocalSend:previewFile(path)
+    local attributes = require("libs/libkoreader-lfs").attributes(path)
+    if not attributes or attributes.mode ~= "file" then
+        notify(translate("Cannot read source file"), 3)
+        return
+    end
+    local util = require("util")
+    local filename = path:match("[^/]+$")
+    local details = util.getFriendlySize(attributes.size)
+    if path:lower():match("%.txt$") then
+        local file = io.open(path, "rb")
+        if file then
+            local excerpt = file:read(4096) or ""
+            file:close()
+            details = details .. "\n\n" .. util.fixUtf8(excerpt, "�")
+            if attributes.size > #excerpt then details = details .. "…" end
+            UIManager:show(require("ui/widget/textviewer"):new{ title = filename, text = details })
+            return
+        end
+    end
+    local dialog
+    local buttons = {{ { text = translate("Close"), callback = function() UIManager:close(dialog) end } }}
+    if self.ui.bookinfo and require("document/documentregistry"):hasProvider(path) and not path:lower():match("%.txt$") then
+        buttons[1][2] = { text = translate("Show cover"), callback = function()
+            local ok = pcall(self.ui.bookinfo.onShowBookCover, self.ui.bookinfo, path)
+            if not ok then notify(translate("Cannot preview this file."), 3) end
+        end }
+    end
+    dialog = require("ui/widget/buttondialog"):new{ title = filename .. "\n\n" .. details, buttons = buttons }
+    UIManager:show(dialog)
 end
 
 function LocalSend:begin(mode, paths)
@@ -160,12 +209,7 @@ function LocalSend:startService(mode, paths, startup)
             },
         }
         if mode == "send" then
-            assert(#paths <= Service.MAX_FILES, T(translate("At most %1 files per transfer."), Service.MAX_FILES))
-            prepared_files = {}
-            for _, path in ipairs(paths) do
-                local extension = path:match("%.([^./]+)$") or ""
-                prepared_files[#prepared_files + 1] = service:file(path, MIME_TYPES[extension:lower()])
-            end
+            prepared_files = self:prepareFiles(service, paths)
         end
         self.service = service
         self:log("listener.begin", port)
@@ -208,7 +252,7 @@ function LocalSend:startService(mode, paths, startup)
                 for _, task in ipairs(service.tasks) do
                     if task.kind == "cancel" then cancellation_pending = true; break end
                 end
-                if not cancellation_pending then self:stop(); return end
+                if not cancellation_pending then self.finish_cancellation = nil end
             end
             if (self.peer_menu or self.receive_dialog and not service.incoming)
                 and socket.gettime() >= next_announcement then
@@ -258,6 +302,7 @@ function LocalSend:stop(reason)
     self:closeKindleFirewall()
     self.service, self.poll, self.finish_cancellation = nil, nil, nil
     self.peer_snapshot = nil
+    self.send_files = nil
     self.receive_progress = nil
     self:closeOffer()
     self:closeWidget("startup_dialog")
@@ -369,16 +414,15 @@ function LocalSend:updateReceiveStatus()
 end
 
 function LocalSend:showPeers(files)
+    self.send_files = files
     local menu = require("ui/widget/menu"):new{
-        title = translate("LocalSend Lite"),
+        title = T(translate("Send files (%1)"), #files),
         width = Device.screen:getWidth(),
         height = Device.screen:getHeight(),
-        item_table = { { text = translate("Looking for nearby devices…"), select_enabled = false } },
+        item_table = {},
         onMenuSelect = function(_, item)
-            if item.peer then
-                self:closeWidget("peer_menu")
-                self:send(item.peer, files)
-            end
+            if item.callback then item.callback() end
+            if item.peer then self:send(item.peer, self.send_files) end
             return true
         end,
         close_callback = function()
@@ -387,13 +431,26 @@ function LocalSend:showPeers(files)
         end,
     }
     self.peer_menu = menu
+    self:updatePeers(true)
     UIManager:show(menu)
 end
 
-function LocalSend:updatePeers()
+function LocalSend:previewSendFiles()
+    local items = {}
+    for _, file in ipairs(self.send_files) do
+        items[#items + 1] = { text = file.fileName, mandatory = require("util").getFriendlySize(file.size), path = file.path }
+    end
+    UIManager:show(require("ui/widget/menu"):new{
+        title = translate("Preview files"),
+        item_table = items,
+        onMenuSelect = function(_, item) self:previewFile(item.path); return true end,
+    })
+end
+
+function LocalSend:updatePeers(force)
     local peers = self.service:listPeers()
     local previous = self.peer_snapshot or {}
-    local changed = #peers ~= #previous
+    local changed = force or #peers ~= #previous
     for index, peer in ipairs(peers) do
         local prior = previous[index]
         if not prior or prior.alias ~= peer.alias or prior.address ~= peer.address
@@ -406,20 +463,26 @@ function LocalSend:updatePeers()
     if not changed then return end
 
     self.peer_snapshot = peers
-    local items = {}
+    local items = {
+        { text = translate("Choose files…"), callback = function() self:chooseFiles() end },
+        { text = translate("Preview files"), callback = function() self:previewSendFiles() end },
+    }
+    if #peers == 0 then
+        items[#items + 1] = { text = translate("Looking for nearby devices…"), select_enabled = false }
+    end
     for _, peer in ipairs(peers) do
         local label = displayAlias(peer.alias)
         if peer.protocol == "http" then label = T(translate("%1 (unencrypted)"), label) end
         items[#items + 1] = { text = label, peer = peer }
     end
-    self.peer_menu:switchItemTable(nil, items)
+    self.peer_menu:switchItemTable(T(translate("Send files (%1)"), #self.send_files), items)
 end
 
 function LocalSend:requestPin(peer, files)
     self.pin_dialog = require("ui/widget/inputdialog"):new{
         title = translate("Receiver PIN"),
         buttons = {{
-            { text = translate("Cancel"), id = "close", callback = function() self:stop() end },
+            { text = translate("Cancel"), id = "close", callback = function() self:closeWidget("pin_dialog") end },
             { text = translate("Send"), callback = function()
                 local pin = self.pin_dialog:getInputText()
                 self:closeWidget("pin_dialog")
@@ -432,6 +495,7 @@ function LocalSend:requestPin(peer, files)
 end
 
 function LocalSend:send(peer, files, pin)
+    if self.transfer_dialog or self.finish_cancellation or self.pin_dialog then return end
     self.transfer_dialog = require("ui/widget/buttondialog"):new{
         title = T(translate("Sending to %1…"), displayAlias(peer.alias)),
         dismissable = false,
@@ -445,7 +509,6 @@ function LocalSend:send(peer, files, pin)
     self.service:send(peer, files, pin, function(success, detail)
         self:closeWidget("transfer_dialog")
         if detail == 401 and not success then self:requestPin(peer, files); return end
-        self:stop()
         if success then
             if type(detail) == "number" and detail < #files then
                 notify(T(translate("Sent %1 of %2 files."), detail, #files), 3)

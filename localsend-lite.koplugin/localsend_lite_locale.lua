@@ -2,6 +2,16 @@ local gettext = require("gettext")
 
 local chinese_messages = {
     ["Send files"] = {"发送文件", "傳送檔案"},
+    ["Send files (%1)"] = {"发送文件（%1）", "傳送檔案（%1）"},
+    ["Tap files to select them. Long-press to preview."] = {
+        "轻点文件可多选，长按可预览。", "輕點檔案可多選，長按可預覽。",
+    },
+    ["Choose files…"] = {"选择文件…", "選擇檔案…"},
+    ["Preview files"] = {"预览文件", "預覽檔案"},
+    ["Show cover"] = {"查看封面", "查看封面"},
+    ["Close"] = {"关闭", "關閉"},
+    ["Cannot read source file"] = {"无法读取源文件。", "無法讀取來源檔案。"},
+    ["Cannot preview this file."] = {"无法预览此文件。", "無法預覽此檔案。"},
     ["Receive files"] = {"接收文件", "接收檔案"},
     ["Wi-Fi has no IPv4 address."] = {"Wi-Fi 没有 IPv4 地址。", "Wi-Fi 沒有 IPv4 位址。"},
     ["At most %1 files per transfer."] = {"每批最多传输 %1 个文件。", "每批最多傳輸 %1 個檔案。"},

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/bbsteel/koreader-localsend-lite/releases/tag/v0.1.4) — 2026-11-20
+
+- Select multiple files directly in the send picker and submit them as a single transfer.
+- Keep selections when paging within a folder. Clear them when navigating to another folder.
+- Preview the batch list or long-press a file to view its details, a text excerpt, or an available cover.
+- Keep the device list open after sending so the same batch can be reused or replaced.
+
 ## [0.1.3](https://github.com/bbsteel/koreader-localsend-lite/releases/tag/v0.1.3) — 2026-11-19
 
 - Keep a fixed LocalSend Lite title above the receive status.

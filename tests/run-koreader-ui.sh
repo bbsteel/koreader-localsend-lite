@@ -141,34 +141,91 @@ local sample_path = os.getenv("KO_HOME") .. "/sample.epub"
 local sample = assert(io.open(sample_path, "wb"))
 assert(sample:write("LocalSend menu test"))
 sample:close()
-local UIManager = require("ui/uimanager")
-actions[1].callback()
-local path_chooser_type = require("ui/widget/pathchooser")
-local file_picker
-for _, window in ipairs(UIManager._window_stack) do
-    if getmetatable(window.widget) == path_chooser_type then file_picker = window.widget end
+local text_path = os.getenv("KO_HOME") .. "/preview.txt"
+local text_file = assert(io.open(text_path, "wb"))
+text_file:write("LocalSend quick preview")
+text_file:close()
+local child_directory = os.getenv("KO_HOME") .. "/send-child"
+assert(require("libs/libkoreader-lfs").mkdir(child_directory))
+for index = 1, 40 do
+    local filler = assert(io.open(os.getenv("KO_HOME") .. ("/q-%02d.txt"):format(index), "wb"))
+    filler:close()
 end
-assert(file_picker, "KOReader's native file picker should be open")
-assert(not plugin.service and file_picker.select_file and not file_picker.select_directory)
-UIManager:close(file_picker)
-FileManager.instance.selected_files = { [sample_path] = true }
+local UIManager = require("ui/uimanager")
+local function findWidget(widget_type)
+    for index = #UIManager._window_stack, 1, -1 do
+        local widget = UIManager._window_stack[index].widget
+        if getmetatable(widget) == widget_type then return widget end
+    end
+end
 actions[1].callback()
+local picker_type = require("localsend_lite_picker")
+local picker = assert(findWidget(picker_type))
+assert(not plugin.service, "Selecting and previewing files should work offline")
+local function findFile(path)
+    for index, item in ipairs(picker.item_table) do
+        if item.path == path then return item, math.ceil(index / picker.perpage) end
+    end
+end
+picker:onMenuHold(assert(findFile(text_path)))
+local preview = assert(findWidget(require("ui/widget/textviewer")))
+assert(preview.text:find("LocalSend quick preview", 1, true))
+UIManager:close(preview)
+local sample_item, sample_page = findFile(sample_path)
+local text_item, text_page = findFile(text_path)
+assert(sample_item and text_item and sample_page ~= text_page)
+picker:onGotoPage(text_page)
+picker:onMenuSelect(text_item)
+picker:onGotoPage(sample_page)
+picker:onMenuSelect(sample_item)
+picker:onGotoPage(text_page)
+assert(picker.page == text_page and text_item.dim and sample_item.dim)
+assert(picker.selection_count == 2)
+picker:changeToPath(picker.path .. "/.")
+assert(picker.selection_count == 2, "A refresh of the same folder should preserve the batch")
+picker:onMenuSelect(assert(findFile(child_directory)))
+assert(picker.path == child_directory and picker.selection_count == 0 and not next(picker.selection))
+picker:onFolderUp()
+assert(not findFile(sample_path).dim and not findFile(text_path).dim)
+picker:onMenuSelect(assert(findFile(sample_path)))
+picker:onMenuSelect(assert(findFile(text_path)))
+assert(picker.selection_count == 2)
+picker:onLeftButtonTap()
 assert(plugin.service.info.alias == alias)
 local device_menu = assert(plugin.peer_menu)
-assert(#device_menu.item_table == 1 and device_menu.item_table[1].select_enabled == false)
+assert(#plugin.send_files == 2 and device_menu.item_table[3].select_enabled == false)
+device_menu:onMenuSelect(device_menu.item_table[2])
+local batch_preview = assert(findWidget(require("ui/widget/menu")))
+assert(batch_preview.title == "Preview files" and #batch_preview.item_table == 2)
+batch_preview:onClose()
 plugin.service:remember("192.168.0.2", {
     alias = "Quiet Peach", version = "2.2", protocol = "http", port = 53317, fingerprint = "test",
 })
 plugin:updatePeers()
-assert(#device_menu.item_table == 1 and device_menu.item_table[1].peer.alias == "Quiet Peach")
-local device_item = device_menu.item_table[1]
+local device_item = device_menu.item_table[3]
+assert(device_item.peer.alias == "Quiet Peach")
 assert(device_item.text == "「Quiet Peach」 (unencrypted)")
-plugin.service.send = function() end
-plugin:send(device_item.peer, { plugin.service:file(sample_path) })
+local finish_send
+plugin.service.send = function(_, _, files, _, callback)
+    assert(#files == 2 and files[1].path == text_path and files[2].path == sample_path)
+    finish_send = callback
+end
+device_menu:onMenuSelect(device_item)
 assert(plugin.transfer_dialog.title:find("「Quiet Peach」", 1, true))
-plugin:closeWidget("transfer_dialog")
+finish_send(true, 2)
+assert(plugin.peer_menu == device_menu and plugin.service and not plugin.transfer_dialog)
+device_menu:onMenuSelect(device_menu.item_table[1])
+picker = assert(findWidget(picker_type))
+picker:onMenuSelect(assert(findFile(sample_path)))
+picker:onLeftButtonTap()
+assert(plugin.peer_menu == device_menu and #plugin.send_files == 1 and plugin.send_files[1].path == sample_path)
 device_menu:onClose()
 assert(not plugin.service and not plugin.poll and not plugin.peer_menu)
+FileManager.instance.selected_files = { [sample_path] = true, [text_path] = false }
+actions[1].callback()
+assert(plugin.peer_menu and #plugin.send_files == 1 and plugin.send_files[1].path == sample_path)
+plugin:stop()
+FileManager.instance.selected_files = nil
 
 local gettext = require("gettext")
 local alias_for = require("localsend_lite_alias")
