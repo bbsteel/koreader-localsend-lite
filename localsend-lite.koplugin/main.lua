@@ -19,6 +19,10 @@ local function notify(message, timeout)
     UIManager:show(require("ui/widget/infomessage"):new{ text = message, timeout = timeout })
 end
 
+local function displayAlias(alias)
+    return "「" .. alias .. "」"
+end
+
 function LocalSend:init()
     self.ui.menu:registerToMainMenu(self)
 end
@@ -278,30 +282,49 @@ function LocalSend:onSuspend() self:stop("device suspended") end
 function LocalSend:onNetworkDisconnected() self:stop("network disconnected") end
 
 function LocalSend:showReceiver()
-    self.receive_dialog = require("ui/widget/buttondialog"):new{
-        title = self:waitingForFilesTitle(),
+    local dialog = require("ui/widget/buttondialog"):new{
+        title = translate("LocalSend Lite"),
+        title_align = "center",
+        use_info_style = false,
         buttons = {{ { text = translate("Stop"), callback = function() self:stop() end } }},
         tap_close_callback = function()
             self.receive_dialog = nil
             self:stop()
         end,
     }
-    UIManager:show(self.receive_dialog)
+    dialog.status_widget = require("ui/widget/textboxwidget"):new{
+        text = self:waitingForFilesStatus(),
+        width = dialog:getAddedWidgetAvailableWidth(),
+        face = dialog.info_face,
+        parent = dialog,
+        not_focusable = true,
+    }
+    dialog:addWidget(dialog.status_widget)
+    self.receive_dialog = dialog
+    UIManager:show(dialog)
 end
 
-function LocalSend:waitingForFilesTitle()
+function LocalSend:waitingForFilesStatus()
     return T(translate("Waiting for files as %1\n\nSave to %2"),
-        self.service.info.alias, self.service.receive_directory)
+        displayAlias(self.service.info.alias), self.service.receive_directory)
+end
+
+function LocalSend:setReceiveStatus(status)
+    local dialog = self.receive_dialog
+    if dialog.status_widget.text ~= status then
+        dialog.status_widget:setText(status)
+        dialog:reinit()
+        UIManager:setDirty("all", "ui")
+    end
 end
 
 function LocalSend:updateReceiveStatus()
-    local dialog = self.receive_dialog
-    if not dialog then return end
+    if not self.receive_dialog then return end
     local session = self.service.incoming
     if not session or not session.accepted then
         if self.receive_progress then
             self.receive_progress = nil
-            dialog:setTitle(self:waitingForFilesTitle())
+            self:setReceiveStatus(self:waitingForFilesStatus())
         end
         return
     end
@@ -338,12 +361,11 @@ function LocalSend:updateReceiveStatus()
         and math.floor(100 * session.received_bytes / session.total_bytes)
         or math.floor(100 * session.saved / session.total_files)
     local speed = require("util").getFriendlySize(math.floor(bytes_per_second))
-    local title = table.concat({
-        T(translate("Receiving from %1"), session.alias),
+    self:setReceiveStatus(table.concat({
+        T(translate("Receiving from %1"), displayAlias(session.alias)),
         current_status,
         T(translate("%1/%2 files saved · %3% · %4/s"), session.saved, session.total_files, batch_percent, speed),
-    }, "\n\n")
-    if dialog.title ~= title then dialog:setTitle(title) end
+    }, "\n\n"))
 end
 
 function LocalSend:showPeers(files)
@@ -386,7 +408,7 @@ function LocalSend:updatePeers()
     self.peer_snapshot = peers
     local items = {}
     for _, peer in ipairs(peers) do
-        local label = peer.alias
+        local label = displayAlias(peer.alias)
         if peer.protocol == "http" then label = T(translate("%1 (unencrypted)"), label) end
         items[#items + 1] = { text = label, peer = peer }
     end
@@ -411,7 +433,7 @@ end
 
 function LocalSend:send(peer, files, pin)
     self.transfer_dialog = require("ui/widget/buttondialog"):new{
-        title = T(translate("Sending to %1…"), peer.alias),
+        title = T(translate("Sending to %1…"), displayAlias(peer.alias)),
         dismissable = false,
         buttons = {{ { text = translate("Cancel"), callback = function()
             self.service:cancelSend()
@@ -447,14 +469,35 @@ function LocalSend:closeOffer(session)
     end
 end
 
-function LocalSend:showOffer(session, respond)
-    local lines = { T(translate("Receive files from %1?"), session.alias), "" }
-    for index, file in ipairs(session.ordered_files) do
-        if index > 5 then lines[#lines + 1] = T(translate("+%1 more"), #session.ordered_files - 5); break end
-        lines[#lines + 1] = file.name
+function LocalSend:showOffer(session, respond, page)
+    local files_per_page = 5
+    page = page or 1
+    local page_count = math.ceil(#session.ordered_files / files_per_page)
+    local lines = { T(translate("Receive files from %1?"), displayAlias(session.alias)), "" }
+    local file_prefix = #session.ordered_files > 1 and "• " or ""
+    for index = (page - 1) * files_per_page + 1, math.min(page * files_per_page, #session.ordered_files) do
+        lines[#lines + 1] = file_prefix .. session.ordered_files[index].name
+    end
+    local page_buttons
+    if page_count > 1 then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = T(translate("Page %1 of %2"), page, page_count)
+        local buttons = {}
+        local function goToPage(target_page)
+            self:closeOffer(session)
+            self:showOffer(session, respond, target_page)
+        end
+        if page > 1 then
+            buttons[#buttons + 1] = { text = translate("Previous"), callback = function() goToPage(page - 1) end }
+        end
+        if page < page_count then
+            buttons[#buttons + 1] = { text = translate("Next"), callback = function() goToPage(page + 1) end }
+        end
+        page_buttons = { buttons }
     end
     self.offer_session = session
     local function decide(accepted)
+        if accepted and page_buttons then self:closeOffer(session) end
         self.offer_session, self.offer_dialog = nil, nil
         respond(accepted)
         if accepted then self:updateReceiveStatus() end
@@ -463,6 +506,9 @@ function LocalSend:showOffer(session, respond)
         text = table.concat(lines, "\n"),
         ok_text = translate("Accept"),
         cancel_text = translate("Decline"),
+        other_buttons = page_buttons,
+        other_buttons_first = true,
+        keep_dialog_open = page_buttons ~= nil,
         ok_callback = function() decide(true) end,
         cancel_callback = function() decide(false) end,
         dismissable = false,

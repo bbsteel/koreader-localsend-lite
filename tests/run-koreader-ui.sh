@@ -32,6 +32,20 @@ G_reader_settings = require("luasettings"):open(os.getenv("KO_HOME") .. "/settin
 G_reader_settings:saveSetting("extra_plugin_paths", { arg[1] })
 G_reader_settings:saveSetting("localsend-lite", { port = 53321, alias = "KOReader (Emulator)" })
 local Device = require("device")
+local screenshot_directory = os.getenv("LOCALSEND_UI_SCREENSHOTS")
+local function captureDialog(name, dialog)
+    if not screenshot_directory then return end
+    local UIManager = require("ui/uimanager")
+    local InfoMessage = require("ui/widget/infomessage")
+    for index = #UIManager._window_stack, 1, -1 do
+        local widget = UIManager._window_stack[index].widget
+        if getmetatable(widget) == InfoMessage then UIManager:close(widget) end
+    end
+    UIManager:_repaint()
+    local bounds = dialog.movable.dimen
+    local image = Device.screen.bb:viewport(bounds.x, bounds.y, bounds.w, bounds.h)
+    image:writePNG(screenshot_directory .. "/" .. name .. ".png")
+end
 require("document/canvascontext"):init(Device)
 local FileManager = require("apps/filemanager/filemanager")
 FileManager:showFiles(os.getenv("KO_HOME"))
@@ -56,7 +70,16 @@ actions[2].callback()
 assert(plugin.service and plugin.receive_dialog)
 local alias = plugin.service.info.alias
 assert(alias:match("^%a+ %a+$") and not alias:find("KOReader", 1, true))
-assert(plugin.receive_dialog.title:find(alias, 1, true))
+assert(plugin.receive_dialog.title == "LocalSend Lite")
+assert(plugin.receive_dialog.status_widget.text:find("「" .. alias .. "」", 1, true))
+if screenshot_directory then
+    local receive_directory = plugin.service.receive_directory
+    plugin.service.receive_directory = "/mnt/us/documents"
+    plugin:setReceiveStatus(plugin:waitingForFilesStatus())
+    captureDialog("receive-waiting", plugin.receive_dialog)
+    plugin.service.receive_directory = receive_directory
+    plugin:setReceiveStatus(plugin:waitingForFilesStatus())
+end
 local socket = require("socket")
 local real_gettime = socket.gettime
 local announcements = 0
@@ -71,9 +94,24 @@ socket.gettime = real_gettime
 assert(announcements == 1, "The receive panel must keep announcing")
 local incoming = { alias = "Gentle Kiwi", ordered_files = {} }
 for index = 1, 6 do incoming.ordered_files[index] = { name = index .. ".epub" } end
-plugin:showOffer(incoming, function() end)
-assert(plugin.offer_dialog.ok_text == "Accept" and plugin.offer_dialog.text:find("+1 more", 1, true))
-plugin:closeOffer(incoming)
+local offer_accepted
+plugin:showOffer(incoming, function(accepted) offer_accepted = accepted end)
+assert(plugin.offer_dialog.ok_text == "Accept" and plugin.offer_dialog.text:find("Page 1 of 2", 1, true))
+assert(plugin.offer_dialog.text:find("「Gentle Kiwi」", 1, true))
+for index = 1, 5 do
+    assert(plugin.offer_dialog.text:find("• " .. index .. ".epub", 1, true))
+end
+assert(not plugin.offer_dialog.text:find("6.epub", 1, true))
+captureDialog("receive-batch", plugin.offer_dialog)
+plugin.offer_dialog.other_buttons[1][1].callback()
+assert(plugin.offer_dialog.text:find("Page 2 of 2", 1, true))
+assert(plugin.offer_dialog.text:find("• 6.epub", 1, true))
+assert(not plugin.offer_dialog.text:find("5.epub", 1, true))
+assert(offer_accepted == nil)
+plugin.offer_dialog.other_buttons[1][1].callback()
+assert(plugin.offer_dialog.text:find("Page 1 of 2", 1, true))
+plugin.offer_dialog.ok_callback()
+assert(offer_accepted and not plugin.offer_dialog)
 local file = { name = "sample.epub", size = 4096, received_bytes = 0, busy = true, receive_order = 1 }
 local transfer = {
     alias = "Gentle Kiwi", ordered_files = {file}, accepted = true,
@@ -81,18 +119,21 @@ local transfer = {
 }
 plugin.service.incoming = transfer
 plugin:updateReceiveStatus()
-assert(plugin.receive_dialog.title:find("Receiving from Gentle Kiwi", 1, true))
+assert(plugin.receive_dialog.status_widget.text:find("Receiving from 「Gentle Kiwi」", 1, true))
 file.received_bytes, transfer.received_bytes = 2048, 2048
 socket.gettime = function() return plugin.receive_progress.updated_at + 2 end
 plugin:updateReceiveStatus()
 socket.gettime = real_gettime
-local progress_title = plugin.receive_dialog.title
-assert(progress_title:find("Current file: sample.epub (50%)", 1, true), progress_title)
-assert(progress_title:find("0/1 files saved", 1, true))
-assert(progress_title:find(require("util").getFriendlySize(1024) .. "/s", 1, true), progress_title)
+assert(plugin.receive_dialog.title == "LocalSend Lite")
+local progress_status = plugin.receive_dialog.status_widget.text
+assert(progress_status:find("Current file: sample.epub (50%)", 1, true), progress_status)
+assert(progress_status:find("0/1 files saved", 1, true))
+assert(progress_status:find(require("util").getFriendlySize(1024) .. "/s", 1, true), progress_status)
+captureDialog("receive-progress", plugin.receive_dialog)
 plugin.service.incoming = nil
 plugin:updateReceiveStatus()
-assert(plugin.receive_dialog.title:find("Waiting for files as", 1, true))
+assert(plugin.receive_dialog.title == "LocalSend Lite")
+assert(plugin.receive_dialog.status_widget.text:find("Waiting for files as", 1, true))
 plugin.receive_dialog:onClose()
 assert(not plugin.service and not plugin.receive_dialog)
 
@@ -120,6 +161,12 @@ plugin.service:remember("192.168.0.2", {
 })
 plugin:updatePeers()
 assert(#device_menu.item_table == 1 and device_menu.item_table[1].peer.alias == "Quiet Peach")
+local device_item = device_menu.item_table[1]
+assert(device_item.text == "「Quiet Peach」 (unencrypted)")
+plugin.service.send = function() end
+plugin:send(device_item.peer, { plugin.service:file(sample_path) })
+assert(plugin.transfer_dialog.title:find("「Quiet Peach」", 1, true))
+plugin:closeWidget("transfer_dialog")
 device_menu:onClose()
 assert(not plugin.service and not plugin.poll and not plugin.peer_menu)
 
@@ -142,10 +189,11 @@ for _, locale in ipairs({ "zh_CN", "zh_TW" }) do
     local localized_alias = plugin.service.info.alias
     assert(localized_alias == alias_for(plugin.service.info.fingerprint, locale))
     assert(localized_alias:find("的", 1, true) and localized_alias ~= alias)
-    assert(plugin.receive_dialog.title:find(localized_alias, 1, true))
+    assert(plugin.receive_dialog.title == "LocalSend Lite")
+    assert(plugin.receive_dialog.status_widget.text:find("「" .. localized_alias .. "」", 1, true))
     plugin.service.incoming = transfer
     plugin:updateReceiveStatus()
-    assert(plugin.receive_dialog.title:find(locale == "zh_CN" and "当前文件" or "目前檔案", 1, true))
+    assert(plugin.receive_dialog.status_widget.text:find(locale == "zh_CN" and "当前文件" or "目前檔案", 1, true))
     plugin:stop()
 end
 

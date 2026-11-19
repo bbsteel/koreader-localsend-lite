@@ -4,7 +4,9 @@
 
 Send and receive books and other files over your local network using [LocalSend v2.2](https://github.com/localsend/protocol).
 
-**About 29 KB to download.** The v0.1.2 ZIP contains a Lua plugin that runs entirely inside KOReader and reuses its bundled networking libraries. The network service starts on demand when you send or receive files.
+**About 26 KB to download.** The v0.1.3 ZIP contains a Lua plugin that runs entirely inside KOReader and reuses its bundled networking libraries. The network service starts on demand when you send or receive files.
+
+[Changelog](CHANGELOG.md)
 
 ## Install
 
@@ -22,6 +24,12 @@ If you're upgrading from the pre-Lite development build of this project, move it
 
 The plugin interface supports English, Simplified Chinese, and Traditional Chinese. Nicknames follow the KOReader interface language and stay stable for the same device identity and language. The plugin includes 22 nickname word lists and falls back to English. File bodies stream in 32 KiB chunks. Transfers support up to 128 files per batch and files smaller than 4 GiB. Plain `.txt` files transfer normally. The plugin's discovery uses IPv4 multicast at `224.0.0.167:53317` and its receiver uses HTTPS on TCP port `53317` by default.
 
+## Screenshots
+
+Captured in the KOReader emulator.
+
+<img src="docs/screenshots/receive-waiting.png" alt="Waiting for files" width="245"> <img src="docs/screenshots/receive-batch.png" alt="Batch confirmation" width="245"> <img src="docs/screenshots/receive-progress.png" alt="Transfer in progress" width="245">
+
 ## Verification
 
 Run the tests against KOReader v2026.07.1 on Linux. Each runner defaults to the installed KOReader Flatpak, or accepts a path to a KOReader directory containing `luajit` and `setupkoenv.lua`. Temporary test files are created under `~/tmp` and removed at exit.
@@ -32,7 +40,7 @@ Run the tests against KOReader v2026.07.1 on Linux. Each runner defaults to the 
 | `bash tests/run-loopback.sh` | Discovery, delayed fourth upload, TLS fingerprints, checksum handling, cancellation, firewall cleanup and log rotation |
 | `bash tests/run-official-cli.sh` | Discovery by Chinese nickname, four-file receiving batch and byte-for-byte HTTPS transfers in both directions with the official LocalSend CLI 1.18.2 |
 
-An earlier build was installed on a Kindle Paperwhite 2. The v0.1.2 receive and log changes have been tested on Linux, with Kindle startup simulated.
+An earlier build was installed on a Kindle Paperwhite 2. The v0.1.3 receive and log changes have been tested on Linux, with Kindle startup simulated.
 
 ## Troubleshooting
 

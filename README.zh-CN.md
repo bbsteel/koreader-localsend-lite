@@ -4,7 +4,9 @@
 
 通过 [LocalSend v2.2](https://github.com/localsend/protocol) 在局域网内收发电子书和其他文件。
 
-**v0.1.2 安装包仅约 29 KB。** 插件在 KOReader 内运行，复用其自带的 Lua 运行环境和网络库，收发文件时才启动网络服务。
+**v0.1.3 安装包仅约 26 KB。** 插件在 KOReader 内运行，复用其自带的 Lua 运行环境和网络库，收发文件时才启动网络服务。
+
+[Changelog](CHANGELOG.md)
 
 ## 安装
 
@@ -22,6 +24,12 @@
 
 插件界面支持英文、简体中文和繁体中文。昵称跟随 KOReader 界面语言，同一设备身份在同一语言下使用固定昵称。插件内置 22 套昵称词库，其他语言使用英文。文件按 32 KiB 分块读写，每批最多 128 个文件，单个小于 4 GiB。普通 `.txt` 附件可正常传输。发现使用 IPv4 组播 `224.0.0.167:53317`，默认接收端口为 HTTPS TCP `53317`。
 
+## 界面截图
+
+截图来自 KOReader 模拟器。
+
+<img src="docs/screenshots/receive-waiting.png" alt="等待接收" width="245"> <img src="docs/screenshots/receive-batch.png" alt="批量确认" width="245"> <img src="docs/screenshots/receive-progress.png" alt="传输进度" width="245">
+
 ## 验证
 
 测试基于 Linux 上的 KOReader v2026.07.1。脚本默认使用已安装的 Flatpak 版 KOReader，也可传入含 `luajit` 和 `setupkoenv.lua` 的目录。临时文件写到 `~/tmp`，结束后自动清理。
@@ -32,7 +40,7 @@
 | `bash tests/run-loopback.sh` | 自动发现、第四个文件延迟上传、TLS 指纹、校验失败处理、取消、防火墙清理模拟与日志轮转 |
 | `bash tests/run-official-cli.sh` | 官方 LocalSend CLI 1.18.2 按中文昵称发现插件，一次发送四个文件，并逐字节核对双向 HTTPS 文件传输 |
 
-更名前的开发版已装到一台 Kindle Paperwhite 2。v0.1.2 的接收与日志功能已在 Linux 上测试，Kindle 启动流程使用模拟验证。
+更名前的开发版已装到一台 Kindle Paperwhite 2。v0.1.3 的接收与日志功能已在 Linux 上测试，Kindle 启动流程使用模拟验证。
 
 ## 问题排查
 
